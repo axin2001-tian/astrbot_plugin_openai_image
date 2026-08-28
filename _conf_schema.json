@@ -1,0 +1,176 @@
+{
+  "stations": {
+    "description": "中转站/站点列表（可添加多个）",
+    "type": "template_list",
+    "templates": {
+      "station": {
+        "name": "中转站",
+        "hint": "添加一个中转站/站点",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "name": {
+            "description": "站点名称（备注，用于 /供应商 切换）",
+            "type": "string",
+            "default": ""
+          },
+          "base": {
+            "description": "API 地址（不含 /v1，自动补全）",
+            "type": "string",
+            "default": "",
+            "hint": "参考地址：OpenAI api.openai.com；硅基流动 api.siliconflow.cn；阿里云百炼 dashscope.aliyuncs.com/compatible-mode；腾讯混元 api.hunyuan.cloud.tencent.com；302.AI api.302.ai。无需填写 /v1。"
+          },
+          "key": {
+            "description": "API Key",
+            "type": "string",
+            "default": "",
+            "hint": "该站点的 API 密钥。留空则不携带 Authorization 头。"
+          }
+        }
+      }
+    }
+  },
+  "active_station": {
+    "description": "当前站点",
+    "type": "string",
+    "default": "",
+    "hint": "当前使用哪个站点：填写站点列表中的「站点名称」。留空则使用第一个站点。也可用指令 /供应商 <站点名称> 切换。"
+  },
+  "provider": {
+    "description": "供应商（旧配置，已迁移到站点列表）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "api_base": {
+    "description": "API 地址（旧配置，已迁移到站点列表）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "api_key": {
+    "description": "API Key（旧配置，已迁移到站点列表）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "master_ids": {
+    "description": "主人用户 ID",
+    "type": "list",
+    "default": [],
+    "hint": "插件主人：拥有全部权限，不受黑名单限制。设置后默认仅主人可用（其他用户需加入白名单才可使用）。填写用户 ID（可在 /sid 中查看），支持多个，如 [\"123456789\", \"987654321\"]"
+  },
+  "whitelist_ids": {
+    "description": "白名单用户 ID",
+    "type": "list",
+    "default": [],
+    "hint": "额外允许使用的用户 ID。设置了主人后，其他用户必须在此添加才能使用；主人与白名单都未设置时，除黑名单外所有人可用。支持多个。"
+  },
+  "blacklist_ids": {
+    "description": "黑名单用户 ID",
+    "type": "list",
+    "default": [],
+    "hint": "禁止使用插件的用户 ID（优先级最高，主人除外）。填写用户 ID，支持多个。"
+  },
+  "draw_command": {
+    "description": "生成指令名",
+    "type": "string",
+    "default": "绘图",
+    "hint": "自定义生成指令名，如 绘图、画图。发送 /<指令名> 进入收集模式（默认 /绘图、/画画、/生成图片 可用，/draw、/img 仍兼容）。"
+  },
+  "unwoken_commands": {
+    "description": "免前缀指令（群聊无需 / 或 @）",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后群聊中直接发送指令即可生效（无需 / 或 @）。注意：聊天消息以指令词开头时可能被误判为指令（如「画画 真好玩」）；无参数指令（模型、指令列表）已要求整句完全匹配。关闭后需用 / 或 @ 触发指令。建议配合主人/白名单使用。"
+  },
+  "auto_recall_status": {
+    "description": "自动撤回状态消息",
+    "type": "bool",
+    "default": true,
+    "hint": "收集模式的状态消息（已进入收集/已收集/继续收集等）在发送「开始」或「取消」后自动撤回；「正在生成/编辑」进度消息在生成完成、结果即将发出前自动撤回。仅在支持撤回的平台（QQ/OneBot）生效，其它平台自动忽略。"
+  },
+  "model": {
+    "description": "图片模型",
+    "type": "string",
+    "default": "",
+    "hint": "留空即可：插件会自动根据当前供应商获取模型列表并选择可用的图像模型（不依赖默认模型）。也可用 /模型 查看列表，或用 /设置模型 <模型名> 指定。"
+  },
+  "size": {
+    "description": "图片尺寸",
+    "type": "string",
+    "default": "1024x1024",
+    "options": [
+      "auto",
+      "1024x1024",
+      "1024x1792",
+      "1792x1024",
+      "1536x1024",
+      "1024x1536",
+      "512x512",
+      "256x256"
+    ],
+    "hint": "gpt-image-1: auto / 1024x1024 / 1536x1024 / 1024x1536；dall-e-3: 1024x1024 / 1024x1792 / 1792x1024；dall-e-2: 256 / 512 / 1024。不匹配的尺寸会自动修正。"
+  },
+  "quality": {
+    "description": "画质",
+    "type": "string",
+    "default": "standard",
+    "options": [
+      "standard",
+      "hd"
+    ],
+    "hint": "仅 dall-e-3 支持（standard/hd）；其他模型会自动忽略该参数。"
+  },
+  "n": {
+    "description": "生成数量",
+    "type": "int",
+    "default": 1,
+    "hint": "一次生成几张。仅 dall-e-2 支持大于 1，其他模型会自动修正为 1。"
+  },
+  "rate_limit_count": {
+    "description": "生成任务限流（窗口内次数）",
+    "type": "int",
+    "default": 3,
+    "hint": "限流窗口内最多启动的生成任务数。0 表示不限流。"
+  },
+  "rate_limit_window": {
+    "description": "生成任务限流窗口（秒）",
+    "type": "int",
+    "default": 60,
+    "hint": "限流窗口时长（秒）。默认 60 秒内最多 3 个生成任务，超出自动排队，空闲后再开始。"
+  },
+  "report_enabled": {
+    "description": "群聊分析开关",
+    "type": "bool",
+    "default": true,
+    "hint": "总开关：关闭后不再记录群消息，指令会提示已关闭。"
+  },
+  "report_mode": {
+    "description": "群聊分析输出模式",
+    "type": "string",
+    "default": "文字",
+    "options": [
+      "文字",
+      "图片"
+    ],
+    "hint": "文字模式：文本+头像；图片模式：调用中转站生成报告长图（不做本地合成）。也可在指令中临时指定，如「群聊报告 图片」或「群聊报告 文字 48」。"
+  },
+  "report_image_source": {
+    "description": "群聊分析图片生成方式（已废弃，图片模式统一走中转站生成）",
+    "type": "string",
+    "default": "中转站（AI 长图，无头像）",
+    "options": [
+      "中转站（AI 长图，无头像）"
+    ],
+    "invisible": true,
+    "hint": "已废弃：图片模式统一调用中转站生成报告长图，不再本地合成。"
+  },
+  "fetched_models": {
+    "description": "最近一次获取到的模型列表（自动保存，仅供查看）",
+    "type": "list",
+    "default": [],
+    "invisible": true,
+    "hint": "由指令 /模型 自动写入。"
+  }
+}
