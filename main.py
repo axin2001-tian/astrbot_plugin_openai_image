@@ -52,27 +52,6 @@ PROVIDER_PRESETS = {
     "自定义中转站（OpenAI 兼容）": "",
 }
 
-# 模型列表中筛选"图像模型"的识别关键词（小写匹配）
-IMAGE_MODEL_KEYWORDS = (
-    "dall",
-    "gpt-image",
-    "image",
-    "flux",
-    "cogview",
-    "wanx",
-    "qwen-image",
-    "stable-diffusion",
-    "sd3",
-    "sdxl",
-    "kolors",
-    "hunyuan",
-    "janus",
-    "seedream",
-    "midjourney",
-    "paint",
-    "t2i",
-)
-
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"})
 
 # 风格指令：关键词 -> 风格提示词（直接作为免 # 前缀的指令使用，如「手办化 [图片]」）
@@ -493,6 +472,10 @@ class OpenAIImagePlugin(Star):
         self._normalize_base_config()
         # 将旧的单供应商配置迁移为站点列表
         self._ensure_stations()
+        # 后台同步一次「图片模型选择」下拉选项（先用已保存列表，再尝试刷新当前站点）
+        self._schedule_model_options_sync()
+        # 「立即获取模型」勾选轮询：配置面板勾选保存后几秒内自动获取
+        self._start_fetch_now_poller()
 
     # ------------------------------------------------------------------
     # 配置工具
@@ -565,6 +548,28 @@ class OpenAIImagePlugin(Star):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"迁移站点配置失败: {e}")
 
+    def _active_station(self) -> dict | None:
+        """当前生效的站点：优先站点内勾选的「设为当前站点」，其次 /供应商 切换的当前站点名，最后第一个。"""
+        stations = self.config.get("stations") or []
+        if not stations:
+            return None
+        for s in stations:
+            if isinstance(s, dict) and s.get("active") is True:
+                return s
+        active = str(self.config.get("active_station", "") or "").strip()
+        if active:
+            for s in stations:
+                if isinstance(s, dict) and str(s.get("name", "") or "").strip() == active:
+                    return s
+        return stations[0] if isinstance(stations[0], dict) else None
+
+    def _mark_active_station(self, name: str) -> None:
+        """把「设为当前站点」标记同步到站点列表：名为 name 的站点置 active=True，其余置 False。"""
+        stations = self.config.get("stations") or []
+        for s in stations:
+            if isinstance(s, dict):
+                s["active"] = bool(str(s.get("name", "") or "").strip() == name)
+
     def _resolve_station(self) -> tuple[str, str]:
         """解析当前使用的站点，返回 (API 根地址不含 /v1, API Key)。
 
@@ -574,23 +579,22 @@ class OpenAIImagePlugin(Star):
         """
         stations = self.config.get("stations") or []
         if stations:
+            chosen = self._active_station() or {}
             active = str(self.config.get("active_station", "") or "").strip()
-            chosen = None
             if active:
-                for s in stations:
-                    if isinstance(s, dict) and str(s.get("name", "") or "").strip() == active:
-                        chosen = s
-                        break
-                if chosen is None and isinstance(stations[0], dict):
-                    # 当前站点名称已失效（可能被改名/删除）：自动修正为第一个站点
-                    first_name = str(stations[0].get("name", "") or "").strip()
-                    self.config["active_station"] = first_name
+                # 仅当 active_station 指向的站点确实不存在时才自动修正；
+                # 通过「设为当前站点」勾选选中的站点不算失效，不覆盖该配置
+                exists = any(
+                    isinstance(s, dict) and str(s.get("name", "") or "").strip() == active
+                    for s in stations
+                )
+                if not exists:
+                    chosen_name = str(chosen.get("name", "") or "").strip()
+                    self.config["active_station"] = chosen_name
                     self._save_config()
                     logger.info(
-                        f"当前站点 {active!r} 不存在，已自动切换为 {first_name or '第一个站点'}"
+                        f"当前站点 {active!r} 不存在，已自动切换为 {chosen_name or '第一个站点'}"
                     )
-            if chosen is None:
-                chosen = stations[0] if isinstance(stations[0], dict) else {}
             base = self._clean_base(str(chosen.get("base", "") or ""))
             key = str(chosen.get("key", "") or "").strip()
             if base:
@@ -604,16 +608,10 @@ class OpenAIImagePlugin(Star):
         return (base or "https://api.openai.com"), key
 
     def _active_station_name(self) -> str:
-        """当前站点名称（用于展示）；名称失效时回退为第一个站点名。"""
-        stations = self.config.get("stations") or []
-        if stations and isinstance(stations[0], dict):
-            active = str(self.config.get("active_station", "") or "").strip()
-            if active:
-                for s in stations:
-                    if isinstance(s, dict) and str(s.get("name", "") or "").strip() == active:
-                        return active
-                return str(stations[0].get("name", "") or "")
-            return str(stations[0].get("name", "") or "")
+        """当前站点名称（用于展示）；无站点时回退为旧供应商名。"""
+        s = self._active_station()
+        if s:
+            return str(s.get("name", "") or "").strip()
         return str(self.config.get("provider", "") or "")
 
     def _api_base(self) -> str:
@@ -633,7 +631,32 @@ class OpenAIImagePlugin(Star):
         return headers
 
     def _model(self) -> str:
+        """当前生效的模型：优先取当前站点的「图片模型选择」，旧全局配置作为回退。
+
+        支持所有生图模型、无内置默认：站点留空时由 /模型 自动按供应商获取。
+        """
+        s = self._active_station()
+        if s:
+            m = str((s.get("model") or "") or "").strip()
+            if m:
+                return m
         return str(self.config.get("model", "") or "").strip()
+
+    def _set_model(self, name: str) -> str:
+        """把模型保存到当前站点的「图片模型选择」；无站点时回退旧全局配置。
+
+        返回保存到的站点名（无站点时返回空字符串）。同时镜像写入旧全局 model，
+        兼容旧代码路径与旧版本配置。
+        """
+        name = (name or "").strip()
+        station_name = ""
+        s = self._active_station()
+        if s is not None:
+            s["model"] = name
+            station_name = str(s.get("name", "") or "").strip()
+        self.config["model"] = name
+        self._save_config()
+        return station_name
 
     def _size(self, model: str) -> str:
         """根据模型约束修正尺寸配置。"""
@@ -680,6 +703,166 @@ class OpenAIImagePlugin(Star):
                 self.config.save_config()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"保存配置失败: {e}")
+
+    def _sync_schema_model_options(self, models: list[str]) -> None:
+        """把最近获取的模型列表同步到 _conf_schema.json 的站点「图片模型选择」下拉选项。
+
+        AstrBot 配置面板无动态选项/按钮，/模型 获取或启动后台同步后重写 schema 的 options，
+        刷新配置页面后即可在「添加供应商」的图片模型选择中下拉选用。
+        列表为空时移除 options，面板回退为普通输入框（避免空下拉提示 "No data available"）。
+        """
+        try:
+            schema_path = Path(__file__).resolve().parent / "_conf_schema.json"
+            with schema_path.open(encoding="utf-8") as f:
+                schema = json.load(f)
+            item = (
+                schema.get("stations", {})
+                .get("templates", {})
+                .get("station", {})
+                .get("items", {})
+                .get("model")
+            )
+            if not isinstance(item, dict):
+                return
+            # 始终保留下拉（空列表时面板显示空下拉，由获取流程填充）
+            item["options"] = list(models)
+            with schema_path.open("w", encoding="utf-8") as f:
+                json.dump(schema, f, ensure_ascii=False, indent=2)
+            if models:
+                logger.info(f"已同步 {len(models)} 个模型到配置面板下拉选项（刷新配置页面生效）")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"同步模型下拉选项失败: {e}")
+
+    def _schedule_model_options_sync(self, retries: int = 3) -> None:
+        """后台同步「图片模型选择」下拉选项：先用已保存列表，再尝试刷新当前站点。
+
+        供插件启动、/供应商 切换、/模型 后调用；获取失败自动重试，保证设置页下拉有模型可选。
+        """
+
+        async def _do() -> None:
+            try:
+                stations = self.config.get("stations") or []
+                legacy_base = str(self.config.get("api_base", "") or "").strip()
+                if not stations and not legacy_base:
+                    # 尚未配置任何供应商：清空下拉，绝不写入任何默认/历史模型
+                    self._sync_schema_model_options([])
+                    return
+                saved = list(self.config.get("fetched_models") or [])
+                if saved:
+                    self._sync_schema_model_options(saved)
+                if not stations:
+                    return
+                last_err: Exception | None = None
+                for attempt in range(max(retries, 1)):
+                    try:
+                        models = await self._get_image_models()
+                        if models:
+                            self.config["fetched_models"] = models
+                            self._save_config()
+                            self._sync_schema_model_options(models)
+                            self._last_schema_synced_station = self._active_station_name()
+                            return
+                    except Exception as e:  # noqa: BLE001
+                        last_err = e
+                        await asyncio.sleep(5 * (attempt + 1))
+                if last_err is not None:
+                    logger.warning(
+                        f"后台获取模型列表失败（已重试 {retries} 次），下拉选项未更新: {last_err}"
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"后台同步模型选项失败: {e}")
+
+        try:
+            asyncio.create_task(_do())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"创建后台同步任务失败: {e}")
+
+    def _maybe_auto_fetch_model_options(self) -> None:
+        """兜底：当前站点的模型尚未同步到面板下拉时，后台自动获取一次（60 秒内最多一次）。
+
+        覆盖「在配置面板添加供应商并切换」的场景：下一次收到消息即自动获取该供应商模型
+        并同步到「图片模型选择」下拉，用户刷新配置页面即可选择。
+        """
+        try:
+            stations = self.config.get("stations") or []
+            if not stations:
+                return
+            cur = self._active_station_name()
+            last = getattr(self, "_last_schema_synced_station", "")
+            if cur and cur == last:
+                return
+            now = time.time()
+            if now - getattr(self, "_last_auto_schema_sync", 0.0) < 60:
+                return
+            self._last_auto_schema_sync = now
+            self._schedule_model_options_sync(retries=1)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"自动获取模型选项失败: {e}")
+
+    async def _fetch_station_models(self, station: dict) -> list[str]:
+        """按指定供应商（站点）的地址/Key 获取其返回的全部模型（不切换当前站点）。
+
+        模型 = 供应商实时返回的全部模型（支持所有生图模型，不过滤、不排序）。
+        """
+        base = self._clean_base(str(station.get("base", "") or ""))
+        if not base:
+            return []
+        key = str(station.get("key", "") or "").strip()
+        headers = {"User-Agent": f"AstrBot-{PLUGIN_NAME}/1.0"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        url = base + "/v1/models"
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True, headers=headers) as client:
+            r = await client.get(url)
+        if r.status_code != 200:
+            raise RuntimeError(self._api_error(r))
+        data = r.json().get("data") or []
+        ids = [str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id")]
+        return self._sort_image_models(ids)
+
+    async def _run_fetch_now(self, station: dict) -> None:
+        """执行一次「立即获取模型」：获取指定供应商全部模型并同步下拉，完成后自动取消勾选。"""
+        name = str(station.get("name", "") or "").strip() or "该供应商"
+        try:
+            models = await self._fetch_station_models(station)
+            if not models:
+                logger.warning(f"获取模型：供应商 {name} 未返回任何模型（请检查 API 地址与 Key）")
+                return
+            self.config["fetched_models"] = models
+            station["fetch_now"] = False
+            self._save_config()
+            self._sync_schema_model_options(models)
+            self._last_schema_synced_station = name
+            logger.info(f"获取模型：已获取供应商 {name} 的 {len(models)} 个模型并同步到下拉")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"获取模型失败（{name}）: {self._fmt_error(e)}")
+            # 失败也取消勾选，避免反复轮询；用户可再次勾选重试
+            station["fetch_now"] = False
+            self._save_config()
+
+    def _start_fetch_now_poller(self) -> None:
+        """轮询配置面板的「🔄 立即获取模型」勾选：勾选保存后数秒内自动获取该供应商模型。
+
+        AstrBot 配置面板没有按钮组件，此开关等效于「获取模型」按钮。
+        """
+
+        async def _loop() -> None:
+            while True:
+                try:
+                    await asyncio.sleep(5)
+                    stations = self.config.get("stations") or []
+                    for s in stations:
+                        if isinstance(s, dict) and s.get("fetch_now") is True:
+                            await self._run_fetch_now(s)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(f"获取模型轮询异常: {e}")
+
+        try:
+            asyncio.create_task(_loop())
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"启动获取模型轮询失败: {e}")
 
     def _semaphore(self) -> asyncio.Semaphore:
         if self._sem is None:
@@ -1141,7 +1324,7 @@ class OpenAIImagePlugin(Star):
         raise RuntimeError("接口返回的数据中没有图片内容（b64_json / url）")
 
     async def _fetch_models(self) -> list[str]:
-        """获取当前供应商支持的所有模型，并筛选出图像模型。"""
+        """获取当前供应商返回的全部模型（支持所有生图模型，不过滤、不内置、不排序）。"""
         url = f"{self._api_base()}/models"
         async with httpx.AsyncClient(
             timeout=60, follow_redirects=True, headers=self._headers()
@@ -1155,27 +1338,19 @@ class OpenAIImagePlugin(Star):
             for m in data
             if isinstance(m, dict) and m.get("id")
         ]
-        keywords = IMAGE_MODEL_KEYWORDS
-        image_models = [m for m in ids if any(k in m.lower() for k in keywords)]
-        if not image_models:
-            # 接口正常但没匹配到关键词时，退化为全部列出，避免漏掉新模型
-            image_models = ids
-        return self._sort_image_models(list(set(image_models)))
+        # 保持供应商返回顺序去重，原样展示
+        return self._sort_image_models(ids)
 
     @staticmethod
     def _sort_image_models(models: list[str]) -> list[str]:
-        """对图像模型排序：优先 gpt-image 系列、dall-e-3、dall-e-2，其余按名称排序。"""
-        def rank(m: str) -> int:
-            ml = m.lower()
-            if "gpt-image" in ml:
-                return 0
-            if "dall-e-3" in ml:
-                return 1
-            if "dall-e-2" in ml:
-                return 2
-            return 3
-
-        return sorted(models, key=lambda m: (rank(m), m.lower()))
+        """保持供应商返回顺序去重（实时列表原样，不按 gpt-image/dall-e 等内置偏好重排）。"""
+        seen: set[str] = set()
+        out: list[str] = []
+        for m in models:
+            if m not in seen:
+                seen.add(m)
+                out.append(m)
+        return out
 
     async def _get_image_models(self, force: bool = False) -> list[str]:
         """获取当前供应商的图像模型列表（带缓存，缓存按供应商隔离）。
@@ -1183,7 +1358,9 @@ class OpenAIImagePlugin(Star):
         force 为 True 时强制重新拉取（用于 /模型 指令）。
         """
         now = time.time()
-        provider = str(self.config.get("provider", "") or "").strip()
+        provider = self._active_station_name() or str(
+            self.config.get("provider", "") or ""
+        ).strip()
         if (
             not force
             and self._models_cache
@@ -1198,31 +1375,31 @@ class OpenAIImagePlugin(Star):
         return list(models)
 
     async def _resolve_model(self) -> tuple[str, str]:
-        """根据当前供应商解析可用的图像模型（不依赖默认模型）。
+        """解析当前供应商的图片模型（必须先显式设置，不自动默认、不猜测）。
 
-        - 配置了模型且在供应商列表中 -> 直接使用；
-        - 配置为空或不在列表中 -> 自动从供应商列表中选择并保存；
-        - 获取列表失败 -> 回退到配置值（可能为空），由调用方提示。
+        - 已设置（站点/全局）且在供应商列表 -> 直接使用；
+        - 已设置但不在列表 -> 仍按设置使用（附提示，列表可能未收录）；
+        - 未设置 -> 返回 ("", 操作提示)，由调用方提示先获取并设置模型。
         返回 (模型名, 提示信息)。
         """
         configured = self._model()
+        if not configured:
+            return (
+                "",
+                "尚未设置图片模型：请先在配置面板「添加供应商」的「图片模型选择」中选取，"
+                "或发送 /模型 获取该供应商模型列表后，用 /设置模型 <模型名> 指定。",
+            )
         try:
             models = await self._get_image_models()
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"自动获取模型列表失败，将使用配置的模型: {e}")
+            logger.warning(f"获取模型列表失败，按已设置模型使用: {e}")
             return configured, ""
-        if configured and configured in models:
+        if configured in models:
             return configured, ""
-        if not models:
-            return configured, ""
-        picked = models[0]
-        self.config["model"] = picked
-        self._save_config()
-        if configured:
-            note = f"配置的模型 {configured} 不在供应商列表中，已自动切换为 {picked}（可用 /设置模型 指定）"
-        else:
-            note = f"已自动根据供应商选择模型：{picked}"
-        return picked, note
+        return (
+            configured,
+            f"提示：{configured} 不在当前供应商模型列表中（可能未收录或已改名），仍按设置使用；可用 /模型 查看列表。",
+        )
 
     # ------------------------------------------------------------------
     # 引用消息收集
@@ -2134,6 +2311,8 @@ class OpenAIImagePlugin(Star):
     async def on_all_message(self, event: AstrMessageEvent):
         """监听所有消息：风格指令、免前缀指令解析、自定义生成指令入口、收集确认与收集模式处理。"""
         try:
+            # 配置面板模型下拉兜底：站点已配置但从未获取过模型时，后台自动获取一次
+            self._maybe_auto_fetch_model_options()
             # 风格菜单选择（回复数字/分类名查看对应分类）
             if await self._handle_style_menu_select(event):
                 return
@@ -2811,16 +2990,7 @@ class OpenAIImagePlugin(Star):
 
             model, model_note = await self._resolve_model()
             if not model:
-                await event.send(
-                    MessageChain(
-                        [
-                            Plain(
-                                "⚠️ 未配置图片模型，且无法从供应商自动获取。请检查 API 地址 / Key 配置，"
-                                "或用 /模型 获取模型列表后以 /设置模型 指定。"
-                            )
-                        ]
-                    )
-                )
+                await event.send(MessageChain([Plain(f"⚠️ {model_note}")]))
                 return False
 
             # 候选模型：当前模型 + 供应商列表中其余图像模型（遇图片额度 429 时自动换模型重试）
@@ -2872,9 +3042,8 @@ class OpenAIImagePlugin(Star):
 
             caption = f"✨ 已生成（{used_model}）"
             if used_model != model:
-                # 自动切换了模型：保存并告知用户
-                self.config["model"] = used_model
-                self._save_config()
+                # 自动切换了模型：保存到当前站点并告知用户
+                self._set_model(used_model)
                 caption += f"\nℹ️ 模型 {model} 图片额度不可用，已自动切换为 {used_model}"
             await self._send_image(event, out, caption)
             return True
@@ -2891,6 +3060,23 @@ class OpenAIImagePlugin(Star):
             await self._reject_unauthorized(event)
             return
         await event.send(MessageChain([Plain("🔍 正在从供应商拉取模型列表...")]))
+        stations = self.config.get("stations") or []
+        legacy_base = str(self.config.get("api_base", "") or "").strip()
+        if not stations and not legacy_base:
+            # 尚未配置任何供应商：清空下拉中的历史模型，并明确提示
+            self._sync_schema_model_options([])
+            await event.send(
+                MessageChain(
+                    [
+                        Plain(
+                            "⚠️ 尚未配置任何供应商，无法获取模型。\n"
+                            "请先在配置面板的「中转站/站点列表」中添加供应商（API 地址/Key），"
+                            "或使用 /供应商 添加 <站点名称> <API地址> [Key] 添加。"
+                        )
+                    ]
+                )
+            )
+            return
         try:
             models = await self._get_image_models(force=True)
         except Exception as e:  # noqa: BLE001
@@ -2903,20 +3089,23 @@ class OpenAIImagePlugin(Star):
             )
             return
 
-        # 保存获取到的模型列表，并自动填入当前模型（若未设置或已失效）
+        # 只保存获取到的模型列表并同步下拉；不自动写入任何默认模型（由用户选择）
         self.config["fetched_models"] = models
-        current = self._model()
-        if not current or current not in models:
-            self.config["model"] = models[0]
-            current = models[0]
         self._save_config()
+        # 同步到配置面板的「图片模型选择」下拉选项（刷新配置页面生效）
+        self._sync_schema_model_options(models)
+        self._last_schema_synced_station = self._active_station_name()
 
-        lines = [f"📋 图像模型列表（{len(models)} 个）："]
+        lines = [f"📋 图像模型列表（{len(models)} 个，供应商实时获取）："]
         lines += [f"{i + 1}. {m}" for i, m in enumerate(models[:30])]
         if len(models) > 30:
             lines.append(f"... 共 {len(models)} 个")
-        lines.append(f"🎯 当前模型：{current}")
-        lines.append("💡 使用 /设置模型 <模型名> 切换，或直接在配置面板中填写。")
+        current = self._model()
+        if current and current in models:
+            lines.append(f"🎯 当前模型：{current}")
+        else:
+            lines.append("🎯 当前模型：未设置（生成前需先设置：/设置模型 <模型名>，或在配置面板供应商条目中选择）")
+        lines.append("💡 使用 /设置模型 <模型名> 指定；下拉已同步到配置面板（刷新页面可见）。")
         await event.send(MessageChain([Plain("\n".join(lines))]))
 
     @filter.command("设置模型", alias={"切换模型"})
@@ -2935,9 +3124,13 @@ class OpenAIImagePlugin(Star):
                 MessageChain([Plain("💡 用法：/设置模型 <模型名>，如 /设置模型 gpt-image-1。可用 /模型 查看可用的图像模型。")])
             )
             return
-        self.config["model"] = name
-        self._save_config()
-        await event.send(MessageChain([Plain(f"⚙️✅ 已设置图片模型：{name}")]))
+        station_name = self._set_model(name)
+        if station_name:
+            await event.send(
+                MessageChain([Plain(f"⚙️✅ 已设置站点「{station_name}」的图片模型：{name}")])
+            )
+        else:
+            await event.send(MessageChain([Plain(f"⚙️✅ 已设置图片模型：{name}")]))
 
     @filter.command("设置尺寸", alias={"切换尺寸"})
     async def set_size(self, event: AstrMessageEvent, size: GreedyStr):
@@ -3035,11 +3228,12 @@ class OpenAIImagePlugin(Star):
                 }
             )
             self.config["stations"] = stations
-            changed = False
             if not str(self.config.get("active_station", "") or "").strip():
                 # 还没有当前站点：自动设为新添加的站点
                 self.config["active_station"] = sname
-                changed = True
+                self._mark_active_station(sname)
+                # 后台获取新供应商的模型并同步到配置面板下拉
+                self._schedule_model_options_sync()
             self._save_config()
             logger.info(f"站点添加：{sname} -> {self._clean_base(base)}")
             await event.send(
@@ -3065,6 +3259,7 @@ class OpenAIImagePlugin(Star):
                             else ""
                         )
                         self.config["active_station"] = first_name
+                        self._mark_active_station(first_name)
                     self._save_config()
                     logger.info(f"站点删除：{target}")
                     await event.send(MessageChain([Plain(f"📡🗑️ 已删除站点：{target}")]))
@@ -3112,8 +3307,13 @@ class OpenAIImagePlugin(Star):
             for s in stations:
                 if isinstance(s, dict) and str(s.get("name", "") or "").strip() == name:
                     self.config["active_station"] = name
+                    self._mark_active_station(name)
                     self._save_config()
-                    await event.send(MessageChain([Plain(f"📡✅ 已切换到站点：{name}")]))
+                    # 切换后后台获取该供应商模型并同步到配置面板下拉
+                    self._schedule_model_options_sync()
+                    await event.send(
+                        MessageChain([Plain(f"📡✅ 已切换到站点：{name}（正在刷新该供应商模型下拉）")])
+                    )
                     return
             await event.send(
                 MessageChain([Plain(f"⚠️ 未找到名为 {name} 的站点。可用 /供应商 查看全部站点。")])
