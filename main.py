@@ -638,12 +638,12 @@ class OpenAIImagePlugin(Star):
     def _size(self, model: str) -> str:
         """根据模型约束修正尺寸配置。"""
         size = str(self.config.get("size", "") or "").strip()
+        if size == "自动":
+            size = "auto"
         if not size:
             return ""
         ml = model.lower()
-        if size == "auto" and not ml.startswith("gpt-image"):
-            # auto 仅 gpt-image-1 支持
-            return "1024x1024"
+        # auto 直接透传（所有模型均支持，由供应商/模型自行决定；仅 dall-e-2 因接口只接受固定尺寸而回退）
         if ml.startswith("dall-e-2") and size not in (
             "256x256",
             "512x512",
@@ -2950,24 +2950,42 @@ class OpenAIImagePlugin(Star):
             await event.send(MessageChain([Plain("🚫 仅管理员或主人可使用此指令。")]))
             return
         value = str(size).strip().lower()
+        if value == "自动":
+            value = "auto"
         if not value:
             # 展示当前尺寸与可选列表
             current = str(self.config.get("size", "") or "").strip() or "1024x1024"
+            if current == "auto":
+                current = "auto（自动）"
             lines = [f"📐 当前尺寸：{current}"]
-            lines.append("可用尺寸：" + "、".join(SIZE_OPTIONS))
-            lines.append("💡 用法：/设置尺寸 <尺寸>，如 /设置尺寸 1024x1792")
+            lines.append(
+                "可用尺寸："
+                + "、".join(
+                    "auto（自动）" if v == "auto" else v for v in SIZE_OPTIONS
+                )
+            )
+            lines.append("💡 用法：/设置尺寸 <尺寸>，如 /设置尺寸 1024x1792 或 /设置尺寸 自动")
             await event.send(MessageChain([Plain("\n".join(lines))]))
             return
         if value not in SIZE_OPTIONS:
             await event.send(
                 MessageChain(
-                    [Plain(f"⚠️ 尺寸 {value} 不受支持。可用：{'、'.join(SIZE_OPTIONS)}")]
+                    [
+                        Plain(
+                            f"⚠️ 尺寸 {value} 不受支持。可用："
+                            + "、".join(
+                                "auto（自动）" if v == "auto" else v
+                                for v in SIZE_OPTIONS
+                            )
+                        )
+                    ]
                 )
             )
             return
         self.config["size"] = value
         self._save_config()
-        await event.send(MessageChain([Plain(f"📐✅ 已设置图片尺寸：{value}")]))
+        shown = "auto（自动）" if value == "auto" else value
+        await event.send(MessageChain([Plain(f"📐✅ 已设置图片尺寸：{shown}")]))
 
     @filter.command("供应商", alias={"站点", "切换供应商"})
     async def list_stations(self, event: AstrMessageEvent, station_name: GreedyStr):
