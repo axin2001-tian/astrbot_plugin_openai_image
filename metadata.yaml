@@ -2,6 +2,6 @@ name: astrbot_plugin_openai_image
 display_name: OpenAI 图片生成
 desc: 对接 OpenAI 图片生成/编辑 API（DALL·E、gpt-image-1 等），支持供应商选择、模型获取、引用消息收集图片与文字进行改图
 short_desc: OpenAI 图片生成与编辑（供应商选择 / 获取模型 / 引用消息改图）
-version: 1.9.4
+version: 1.9.5
 author: 阿新（指导）-DeepSeek（制作及修改）
 repo: https://github.com/axin2001-tian/astrbot_plugin_openai_image

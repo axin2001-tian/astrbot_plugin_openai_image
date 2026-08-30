@@ -1436,7 +1436,9 @@ class OpenAIImagePlugin(Star):
             for comp in event.get_messages():
                 if not (isinstance(comp, Reply) or getattr(comp, "type", None) == "reply"):
                     continue
-                msg_str = getattr(comp, "message_str", None)
+                msg_str = self._strip_at_placeholders(
+                    getattr(comp, "message_str", None) or ""
+                )
                 if msg_str and msg_str not in text:
                     text = f"{text}\n{msg_str}".strip()
                 for sub in getattr(comp, "chain", None) or []:
@@ -2394,7 +2396,7 @@ class OpenAIImagePlugin(Star):
                 "ts": getattr(event.message_obj, "timestamp", None) or time.time(),
                 "uid": str(event.get_sender_id() or "").strip(),
                 "name": event.get_sender_name() or "",
-                "text": event.message_str.strip(),
+                "text": self._strip_at_placeholders(event.message_str),
                 "img": img,
             }
             self._group_msgs[group_key].append(rec)
@@ -2422,7 +2424,7 @@ class OpenAIImagePlugin(Star):
 
         带图/引用直接进入收集模式；纯文字先确认（60 秒有效）。
         """
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         if not msg:
             return False
         parts = msg.split(" ", 1)
@@ -2479,7 +2481,7 @@ class OpenAIImagePlugin(Star):
         if owner and sender and sender != owner:
             if sender not in self._ids(self.config.get("master_ids")):
                 return False
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         if not msg:
             return False
         if msg in ("取消", "退出"):
@@ -2528,7 +2530,7 @@ class OpenAIImagePlugin(Star):
         if owner and sender and sender != owner:
             if sender not in self._ids(self.config.get("master_ids")):
                 return False
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         if msg == "确认":
             self._pending_collect.pop(event.unified_msg_origin, None)
             event.should_call_llm(False)
@@ -2551,7 +2553,7 @@ class OpenAIImagePlugin(Star):
         """
         if not self.config.get("unwoken_commands", True):
             return False
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         if not msg:
             return False
         parts = msg.split(" ", 1)
@@ -2778,7 +2780,7 @@ class OpenAIImagePlugin(Star):
         name = self._custom_draw_name()
         if not name:
             return False
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         if msg != name and not msg.startswith(name + " "):
             return False
         event.should_call_llm(False)
@@ -2818,7 +2820,7 @@ class OpenAIImagePlugin(Star):
             await self._recall_messages(event, session.sent_msg_ids)
             session.sent_msg_ids.clear()
             return
-        msg = event.message_str.strip()
+        msg = self._strip_at_placeholders(event.message_str)
         # 插件自身指令（含自定义生成指令）不作为素材
         names = set(OUR_COMMANDS)
         custom = self._custom_draw_name()
@@ -3350,6 +3352,25 @@ class OpenAIImagePlugin(Star):
         await self._manage_user_list(event, "blacklist_ids", "黑名单", str(args).strip())
 
     @staticmethod
+    def _strip_at_placeholders(msg: str) -> str:
+        """移除 QQ 官机等平台消息文本中的艾特占位符 <@{id}> / <@!{id}> / <@everyone>。
+
+        官机把艾特拼进文本而非独立消息段，剔除后可避免污染指令匹配、风格词与提示词。
+        """
+        if not msg:
+            return msg
+        msg = re.sub(r"<@!?[0-9a-zA-Z_-]+>", "", msg)
+        msg = re.sub(r"<@everyone>|<@all>", "", msg)
+        return re.sub(r"\s{2,}", " ", msg).strip()
+
+    @staticmethod
+    def _extract_at_placeholder_ids(msg: str) -> list[str]:
+        """提取 QQ 官机文本中的艾特用户 ID：<@123> / <@!123> -> ['123']。"""
+        if not msg:
+            return []
+        return re.findall(r"<@!?([0-9a-zA-Z_-]+)>", msg)
+
+    @staticmethod
     def _is_valid_user_id(uid: str) -> bool:
         """判断是否为合法的用户 ID：纯数字（QQ 等），或含 @ 与 . 的平台 ID（微信/Matrix 等）。"""
         uid = (uid or "").strip()
@@ -3387,6 +3408,10 @@ class OpenAIImagePlugin(Star):
                 continue
             if qq not in at_ids:
                 at_ids.append(qq)
+        # QQ 官机等平台：艾特以 <@id> 文本形式出现（无独立 At 消息段），额外提取
+        for pid in self._extract_at_placeholder_ids(event.message_str):
+            if pid not in at_ids:
+                at_ids.append(pid)
         logger.info(f"{label}指令：text={text!r} 识别到 @用户 {at_ids}")
 
         # 解析操作与目标 ID
